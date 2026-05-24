@@ -88,6 +88,29 @@ input[type='password'], input[type='text'] {
 .card-body .katex { font-size: 1.05em; }
 .card-body .katex-display { margin: 0.5em 0; }
 
+.card-image {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0.5em auto;
+  background: color-mix(in srgb, currentColor 5%, transparent);
+  border-radius: 4px;
+}
+
+.card-image:not([src]) {
+  min-height: 100px;
+  position: relative;
+}
+.card-image:not([src])::after {
+  content: 'loading image…';
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 0.85em;
+  opacity: 0.6;
+}
+
 .cloze-placeholder {
   background: color-mix(in srgb, currentColor 10%, transparent);
   padding: 0 0.3em;

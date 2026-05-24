@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'preact/hooks';
-import type { Card } from './cards';
+import { useEffect, useRef, useState } from 'preact/hooks';
+import type { Card, CardSource } from './cards';
 import { Rating, intervalLabel, type FSRSCardState, type ReviewRating } from './fsrs';
 import {
   answer as answerSession,
@@ -13,10 +13,12 @@ import {
 import { renderAnswer, renderExtra, renderQuestion } from './renderCard';
 import { createItem, updateItem, type FieldMap, type SrsItem } from './srsState';
 import { writeSession } from './sessionLog';
+import { loadImage } from './images';
 
 interface Props {
   token: string;
   cards: Card[];
+  cardSource: CardSource;
   initialState: Map<string, SrsItem>;
   srsProjectId: string;
   srsFields: FieldMap;
@@ -31,6 +33,7 @@ type SyncStatus = 'idle' | 'syncing' | 'error';
 export function Reviewer({
   token,
   cards,
+  cardSource,
   initialState,
   srsProjectId,
   srsFields,
@@ -49,6 +52,8 @@ export function Reviewer({
   const [sync, setSync] = useState<SyncStatus>('idle');
   const [syncError, setSyncError] = useState<string | undefined>(undefined);
   const [endError, setEndError] = useState<string | undefined>(undefined);
+  const cardRef = useRef<HTMLDivElement | null>(null);
+  const extraRef = useRef<HTMLDivElement | null>(null);
 
   const stateMap = (() => {
     const m = new Map<string, FSRSCardState>();
@@ -56,7 +61,28 @@ export function Reviewer({
     return m;
   })();
 
-  // Keyboard shortcuts in review mode: Space = reveal/Good; 1-4 = ratings.
+  // Hydrate any <img data-card-image="…"> placeholders by fetching via the
+  // Contents API (private-repo aware) and swapping in a blob URL.
+  useEffect(() => {
+    if (mode !== 'reviewing') return;
+    const containers = [cardRef.current, extraRef.current].filter(Boolean) as HTMLElement[];
+    for (const root of containers) {
+      const imgs = root.querySelectorAll<HTMLImageElement>('img[data-card-image]');
+      imgs.forEach(async (img) => {
+        if (img.src) return; // already filled
+        const path = img.getAttribute('data-card-image');
+        if (!path) return;
+        try {
+          const url = await loadImage(token, cardSource, path);
+          img.src = url;
+        } catch (e) {
+          img.alt = `[failed to load: ${path}: ${(e as Error).message}]`;
+        }
+      });
+    }
+  }, [mode, revealed, session?.index, token, cardSource]);
+
+  // Keyboard shortcuts in review mode.
   useEffect(() => {
     if (mode !== 'reviewing' || !session) return;
     const handler = (e: KeyboardEvent) => {
@@ -157,10 +183,11 @@ export function Reviewer({
           </span>
         </div>
 
-        <div class="card-body" dangerouslySetInnerHTML={{ __html: body }} />
+        <div ref={cardRef} class="card-body" dangerouslySetInnerHTML={{ __html: body }} />
 
         {revealed && card.extra && (
           <div
+            ref={extraRef}
             class="card-body muted"
             style={{ borderTop: '1px solid currentColor', paddingTop: '0.5rem', fontSize: '0.95em' }}
             dangerouslySetInnerHTML={{ __html: renderExtra(card.extra) }}

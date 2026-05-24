@@ -212,6 +212,7 @@ export function App() {
             <Reviewer
               token={token}
               cards={loadedCards}
+              cardSource={effective.cardSource}
               initialState={srs.bundle.items}
               srsProjectId={srs.bundle.srs.id}
               srsFields={srs.bundle.srsFields}
@@ -219,7 +220,6 @@ export function App() {
               logFields={srs.bundle.logFields}
               onExit={() => {
                 setView('home');
-                // refresh items so next session sees writes from this one
                 if (token) loadAllItems(token, srs.bundle.srs.id).then((items) => {
                   setSrs((prev) => prev.kind === 'loaded' ? { kind: 'loaded', bundle: { ...prev.bundle, items } } : prev);
                 }).catch(() => {});

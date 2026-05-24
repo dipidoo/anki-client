@@ -26,9 +26,7 @@ export interface CardSource {
   repo: string;
   branch: string;
   path: string; // e.g. "cards"
-}
-
-interface RawCard {
+}interface RawCard {
   id?: unknown;
   type?: unknown;
   tags?: unknown;
