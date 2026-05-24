@@ -2,6 +2,8 @@ export interface AppConfig {
   oauthClientId: string;
   scopes: string[];
   projectPrefix: string;
+  /** URL of the server-side OAuth code-exchange helper. See oauth-proxy/. */
+  proxyUrl?: string;
   cardSource: {
     owner: string;
     repo: string;

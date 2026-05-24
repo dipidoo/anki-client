@@ -1,28 +1,23 @@
-// GitHub OAuth Device Flow + PAT-paste fallback.
+// GitHub OAuth2 Web Flow + PAT-paste fallback.
 //
-// Device Flow rationale: see Agent.PD/learning/anki/SYNC-DESIGN.md §11 — no
-// backend, so we can't hold a client_secret. GitHub doesn't support PKCE for
-// OAuth Apps. Device flow is the canonical no-backend path.
+// Why web flow (not device flow): see Agent.PD/learning/anki/SYNC-DESIGN.md §11.
+// CORS on github.com/login/* is impossible from a browser, so we proxy the
+// code-for-token exchange through a tiny server-side helper that holds the
+// client_secret. See ../oauth-proxy/README.md.
 //
-// CORS note: github.com/login/device/code and /login/oauth/access_token do NOT
-// implement OPTIONS preflight. To avoid triggering a preflight we send the body
-// as application/x-www-form-urlencoded (a CORS-safelisted Content-Type) instead
-// of application/json. This turns each call into a "simple request" the browser
-// sends directly. If GitHub returns Access-Control-Allow-Origin on the actual
-// POST response, the flow works end-to-end. If not, we still need a proxy or
-// PAT fallback.
+// Flow:
+//   1. authorize() — top-level navigation to github.com (no CORS involved)
+//   2. user approves on github.com
+//   3. github.com redirects to our origin with ?code=...&state=...
+//   4. handleCallback() — reads code from URL, posts to proxy, gets token
+//   5. token persists in localStorage; URL is cleaned
+
+import type { AppConfig } from './config';
 
 const LS_TOKEN_KEY = 'anki-client:gh_token';
-const GH_DEVICE_CODE_URL = 'https://github.com/login/device/code';
-const GH_TOKEN_URL = 'https://github.com/login/oauth/access_token';
+const SS_STATE_KEY = 'anki-client:oauth_state';
 
-export interface DeviceCodeStart {
-  device_code: string;
-  user_code: string;
-  verification_uri: string;
-  expires_in: number;
-  interval: number;
-}
+const GH_AUTHORIZE_URL = 'https://github.com/login/oauth/authorize';
 
 export function getToken(): string | undefined {
   return localStorage.getItem(LS_TOKEN_KEY) ?? undefined;
@@ -36,60 +31,85 @@ export function clearToken(): void {
   localStorage.removeItem(LS_TOKEN_KEY);
 }
 
-// IMPORTANT: Do NOT add custom headers here (e.g. X-Requested-With). Any
-// non-safelisted header forces a CORS preflight that GitHub will reject.
-// Accept is safelisted; Content-Type with the value below is safelisted.
-const SIMPLE_HEADERS: HeadersInit = {
-  Accept: 'application/json',
-  'Content-Type': 'application/x-www-form-urlencoded',
-};
+/**
+ * Begin OAuth2 web flow by navigating to github.com/login/oauth/authorize.
+ * This call does NOT return — the page navigates away.
+ */
+export function authorize(config: AppConfig): void {
+  const state = randomState();
+  sessionStorage.setItem(SS_STATE_KEY, state);
 
-export async function startDeviceFlow(clientId: string, scopes: string[]): Promise<DeviceCodeStart> {
-  const body = new URLSearchParams({ client_id: clientId, scope: scopes.join(' ') }).toString();
-  const r = await fetch(GH_DEVICE_CODE_URL, { method: 'POST', headers: SIMPLE_HEADERS, body });
-  if (!r.ok) throw new Error(`device/code: ${r.status} ${await r.text()}`);
-  return r.json();
+  const params = new URLSearchParams({
+    client_id: config.oauthClientId,
+    redirect_uri: callbackUrl(),
+    scope: config.scopes.join(' '),
+    state,
+    allow_signup: 'false',
+  });
+  window.location.assign(`${GH_AUTHORIZE_URL}?${params.toString()}`);
 }
 
-export interface DevicePollOk {
-  kind: 'ok';
-  access_token: string;
-  token_type: string;
-  scope: string;
+export interface CallbackResult {
+  kind: 'ok' | 'error' | 'none';
+  token?: string;
+  error?: string;
 }
-export interface DevicePollPending {
-  kind: 'pending';
-  retryAfterSec: number;
-}
-export interface DevicePollDenied {
-  kind: 'denied';
-  error: string;
-  description?: string;
-}
-export type DevicePollResult = DevicePollOk | DevicePollPending | DevicePollDenied;
 
-export async function pollDeviceFlow(
-  clientId: string,
-  deviceCode: string,
-  intervalSec: number,
-): Promise<DevicePollResult> {
-  const body = new URLSearchParams({
-    client_id: clientId,
-    device_code: deviceCode,
-    grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
-  }).toString();
-  const r = await fetch(GH_TOKEN_URL, { method: 'POST', headers: SIMPLE_HEADERS, body });
-  const data = await r.json();
-  if (data.access_token) {
-    return { kind: 'ok', access_token: data.access_token, token_type: data.token_type, scope: data.scope };
+/**
+ * Called on every app boot. If the current URL has ?code=... from a GitHub
+ * redirect, exchange it via the proxy and return the token. Otherwise no-op.
+ */
+export async function handleCallback(config: AppConfig): Promise<CallbackResult> {
+  const url = new URL(window.location.href);
+  const code = url.searchParams.get('code');
+  const state = url.searchParams.get('state');
+  const ghError = url.searchParams.get('error');
+
+  // No callback in progress.
+  if (!code && !ghError) return { kind: 'none' };
+
+  // Always strip ?code/?state/?error from the URL so refresh doesn't replay.
+  url.searchParams.delete('code');
+  url.searchParams.delete('state');
+  url.searchParams.delete('error');
+  url.searchParams.delete('error_description');
+  url.searchParams.delete('error_uri');
+  window.history.replaceState({}, '', url.toString());
+
+  if (ghError) {
+    return { kind: 'error', error: `${ghError}: ${url.searchParams.get('error_description') ?? ''}`.trim() };
   }
-  if (data.error === 'authorization_pending') return { kind: 'pending', retryAfterSec: intervalSec };
-  if (data.error === 'slow_down') return { kind: 'pending', retryAfterSec: intervalSec + 5 };
-  return { kind: 'denied', error: data.error, description: data.error_description };
+
+  // Validate state to prevent CSRF.
+  const expectedState = sessionStorage.getItem(SS_STATE_KEY);
+  sessionStorage.removeItem(SS_STATE_KEY);
+  if (!expectedState || expectedState !== state) {
+    return { kind: 'error', error: 'OAuth state mismatch (possible CSRF or stale callback).' };
+  }
+
+  if (!config.proxyUrl) {
+    return { kind: 'error', error: 'proxyUrl not configured — cannot exchange code without a server-side helper.' };
+  }
+
+  try {
+    const r = await fetch(config.proxyUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ code }),
+    });
+    if (!r.ok) return { kind: 'error', error: `proxy ${r.status}: ${await r.text()}` };
+    const data = (await r.json()) as { access_token?: string; error?: string; error_description?: string };
+    if (data.access_token) {
+      setToken(data.access_token);
+      return { kind: 'ok', token: data.access_token };
+    }
+    return { kind: 'error', error: data.error_description ?? data.error ?? 'unknown' };
+  } catch (e: unknown) {
+    return { kind: 'error', error: `proxy unreachable: ${(e as Error).message}` };
+  }
 }
 
-// Verify a token works by hitting the GraphQL viewer query. api.github.com DOES
-// send CORS allow headers for authed requests, so this is fine.
+/** Hit GraphQL viewer query to verify a token. Works against api.github.com — proper CORS. */
 export async function verifyToken(token: string): Promise<{ login: string; id: string } | undefined> {
   const r = await fetch('https://api.github.com/graphql', {
     method: 'POST',
@@ -99,4 +119,18 @@ export async function verifyToken(token: string): Promise<{ login: string; id: s
   if (!r.ok) return undefined;
   const body = await r.json();
   return body?.data?.viewer;
+}
+
+// ---- internals ----------------------------------------------------------
+
+function callbackUrl(): string {
+  // GitHub matches this against the OAuth App's registered callback URL
+  // EXACTLY (including trailing slash). The SPA reads ?code= from this URL.
+  return `${window.location.origin}${import.meta.env.BASE_URL}`;
+}
+
+function randomState(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
 }

@@ -1,36 +1,58 @@
 import { useEffect, useState } from 'preact/hooks';
 import { loadConfig, type AppConfig } from './config';
 import {
+  authorize,
   clearToken,
   getToken,
-  pollDeviceFlow,
+  handleCallback,
   setToken,
-  startDeviceFlow,
   verifyToken,
-  type DeviceCodeStart,
 } from './auth';
 
 type Viewer = { login: string; id: string };
 
 type AuthState =
+  | { kind: 'booting' }
   | { kind: 'unauth' }
-  | { kind: 'device-pending'; start: DeviceCodeStart; status: string }
+  | { kind: 'exchanging' }
   | { kind: 'verifying' }
   | { kind: 'authed'; viewer: Viewer }
   | { kind: 'error'; message: string };
 
 export function App() {
   const [config, setConfig] = useState<AppConfig | undefined>(undefined);
-  const [state, setState] = useState<AuthState>({ kind: 'unauth' });
+  const [state, setState] = useState<AuthState>({ kind: 'booting' });
   const [patInput, setPatInput] = useState('');
 
-  // Boot: load config, try existing token.
+  // Boot: load config, handle any OAuth callback in the URL, then try existing token.
   useEffect(() => {
     (async () => {
       const cfg = await loadConfig();
       setConfig(cfg);
+
+      // 1. If we just came back from github.com with ?code=, exchange it.
+      const cb = await handleCallback(cfg);
+      if (cb.kind === 'error') {
+        setState({ kind: 'error', message: cb.error ?? 'Auth callback failed.' });
+        return;
+      }
+      if (cb.kind === 'ok' && cb.token) {
+        setState({ kind: 'verifying' });
+        const v = await verifyToken(cb.token);
+        if (v) setState({ kind: 'authed', viewer: v });
+        else {
+          clearToken();
+          setState({ kind: 'error', message: 'Token issued but viewer query failed.' });
+        }
+        return;
+      }
+
+      // 2. No callback in flight. Try a persisted token.
       const existing = getToken();
-      if (!existing) return;
+      if (!existing) {
+        setState({ kind: 'unauth' });
+        return;
+      }
       setState({ kind: 'verifying' });
       const v = await verifyToken(existing);
       if (v) setState({ kind: 'authed', viewer: v });
@@ -41,7 +63,7 @@ export function App() {
     })();
   }, []);
 
-  if (!config) return <p class="muted">Loading…</p>;
+  if (state.kind === 'booting' || !config) return <p class="muted">Loading…</p>;
 
   return (
     <main class="stack">
@@ -53,7 +75,15 @@ export function App() {
             Sign in to load cards from <code>{config.cardSource.owner}/{config.cardSource.repo}</code>{' '}
             and sync SRS state to your <code>{config.projectPrefix}*</code> projects.
           </p>
-          <button onClick={() => beginDeviceFlow(config, setState)}>Sign in with GitHub (device flow)</button>
+          <button onClick={() => authorize(config)} disabled={!config.proxyUrl}>
+            Sign in with GitHub
+          </button>
+          {!config.proxyUrl && (
+            <p class="muted" style={{ fontSize: '0.85em' }}>
+              <code>proxyUrl</code> is not configured in <code>public/config.json</code> yet. Use PAT paste below
+              until the OAuth proxy is deployed.
+            </p>
+          )}
           <details>
             <summary class="muted">Or paste a personal access token</summary>
             <div class="stack" style={{ marginTop: '0.5rem' }}>
@@ -75,21 +105,7 @@ export function App() {
         </div>
       )}
 
-      {state.kind === 'device-pending' && (
-        <div class="stack">
-          <p>
-            Open{' '}
-            <a href={state.start.verification_uri} target="_blank" rel="noreferrer">
-              {state.start.verification_uri}
-            </a>{' '}
-            and enter this code:
-          </p>
-          <div class="code-card">{state.start.user_code}</div>
-          <p class="muted">{state.status}</p>
-          <button onClick={() => setState({ kind: 'unauth' })}>Cancel</button>
-        </div>
-      )}
-
+      {state.kind === 'exchanging' && <p class="muted">Exchanging code for token…</p>}
       {state.kind === 'verifying' && <p class="muted">Verifying token…</p>}
 
       {state.kind === 'error' && (
@@ -121,37 +137,6 @@ export function App() {
       )}
     </main>
   );
-}
-
-async function beginDeviceFlow(config: AppConfig, setState: (s: AuthState) => void): Promise<void> {
-  try {
-    const start = await startDeviceFlow(config.oauthClientId, config.scopes);
-    setState({ kind: 'device-pending', start, status: 'Waiting for you to authorize on github.com…' });
-    const expiresAt = Date.now() + start.expires_in * 1000;
-    while (Date.now() < expiresAt) {
-      await new Promise((res) => setTimeout(res, start.interval * 1000));
-      const r = await pollDeviceFlow(config.oauthClientId, start.device_code, start.interval);
-      if (r.kind === 'ok') {
-        setToken(r.access_token);
-        setState({ kind: 'verifying' });
-        const v = await verifyToken(r.access_token);
-        if (v) {
-          setState({ kind: 'authed', viewer: v });
-          return;
-        }
-        setState({ kind: 'error', message: 'Token received but viewer query failed.' });
-        return;
-      }
-      if (r.kind === 'denied') {
-        setState({ kind: 'error', message: `${r.error}${r.description ? `: ${r.description}` : ''}` });
-        return;
-      }
-      // pending: loop
-    }
-    setState({ kind: 'error', message: 'Device code expired before authorization.' });
-  } catch (e: unknown) {
-    setState({ kind: 'error', message: `${(e as Error).message}. If this is a CORS error, use PAT paste instead — see SYNC-DESIGN §11.` });
-  }
 }
 
 async function acceptPat(
