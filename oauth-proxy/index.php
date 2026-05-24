@@ -1,11 +1,12 @@
 <?php
 // anki-client OAuth proxy (OCF shared-hosting PHP).
 //
-// Purpose: implement step 5 of OAuth2 web flow — exchange the auth code for an
-// access token. The client_secret stays on the server; the browser never sees it.
+// Exchanges a GitHub OAuth `code` for an `access_token`. The client_secret
+// stays on the server; the browser never sees it. All other GitHub API calls
+// are made directly from the SPA against api.github.com (which sends proper
+// CORS headers for authenticated requests).
 //
-// Compat: written for PHP 7.4+ (avoids str_contains, named args, etc.).
-//
+// Compat: written for PHP 7.4+ (no str_contains, no enum, no readonly props).
 // Deploy: see ./README.md.
 
 // Suppress any HTML error output — we MUST return JSON only.
@@ -89,9 +90,18 @@ if (strpos($contentType, 'application/json') !== false) {
     if (is_array($decoded)) $body = $decoded;
 } else {
     parse_str($raw, $body);
+}
+
+$code = isset($body['code']) ? $body['code'] : '';
+if (!is_string($code) || $code === '') {
+    send_json(400, ['error' => 'missing_code']);
+}
+
+// ---- Load secret --------------------------------------------------------
+
 $secretPath = resolve_secret_path();
 if (!$secretPath) {
-    error_log('anki-oauth: cannot resolve $HOME');
+    error_log('anki-oauth: cannot resolve HOME');
     send_json(500, ['error' => 'server_misconfigured', 'detail' => 'no_home']);
 }
 if (!is_readable($secretPath)) {
@@ -99,19 +109,10 @@ if (!is_readable($secretPath)) {
     send_json(500, [
         'error' => 'server_misconfigured',
         'detail' => 'secret_not_readable',
-        'attempted_path' => $secretPath, // safe to disclose; just a path
+        'attempted_path' => $secretPath,
     ]);
 }
-$clientSecret = trim((string) file_get_contents($secretPath
-}
-
-// ---- Load secret --------------------------------------------------------
-
-if (!is_readable(SECRET_PATH)) {
-    error_log('anki-oauth: secret not readable at ' . SECRET_PATH);
-    send_json(500, ['error' => 'server_misconfigured', 'detail' => 'secret_not_readable']);
-}
-$clientSecret = trim((string) file_get_contents(SECRET_PATH));
+$clientSecret = trim((string) file_get_contents($secretPath));
 if ($clientSecret === '') {
     error_log('anki-oauth: secret file empty');
     send_json(500, ['error' => 'server_misconfigured', 'detail' => 'secret_empty']);
