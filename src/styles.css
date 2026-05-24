@@ -77,3 +77,42 @@ input[type='password'], input[type='text'] {
   border-radius: 8px;
   user-select: all;
 }
+
+.card-body {
+  white-space: pre-wrap;
+  font-size: 1.05em;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.card-body .katex { font-size: 1.05em; }
+.card-body .katex-display { margin: 0.5em 0; }
+
+.cloze-placeholder {
+  background: color-mix(in srgb, currentColor 10%, transparent);
+  padding: 0 0.3em;
+  border-radius: 3px;
+  font-weight: 500;
+}
+
+.cloze-reveal {
+  background: color-mix(in srgb, gold 35%, transparent);
+  color: black;
+  padding: 0 0.2em;
+  border-radius: 3px;
+  font-weight: 600;
+}
+
+@media (prefers-color-scheme: dark) {
+  .cloze-reveal {
+    background: color-mix(in srgb, gold 25%, transparent);
+    color: gold;
+  }
+}
+
+.kbd-hint {
+  font-family: ui-monospace, monospace;
+  font-size: 0.7em;
+  opacity: 0.7;
+  margin-left: 0.3em;
+}

@@ -10,7 +10,7 @@ import {
   tally,
   type ReviewSession,
 } from './review';
-import { renderAnswer, renderQuestion } from './renderCard';
+import { renderAnswer, renderExtra, renderQuestion } from './renderCard';
 import { createItem, updateItem, type FieldMap, type SrsItem } from './srsState';
 import { writeSession } from './sessionLog';
 
@@ -26,7 +26,6 @@ interface Props {
 }
 
 type Mode = 'preparing' | 'reviewing' | 'completing' | 'complete';
-
 type SyncStatus = 'idle' | 'syncing' | 'error';
 
 export function Reviewer({
@@ -42,7 +41,6 @@ export function Reviewer({
   const [mode, setMode] = useState<Mode>('preparing');
   const [revealed, setRevealed] = useState(false);
   const [session, setSession] = useState<ReviewSession | undefined>(undefined);
-  // GUID -> projectItemId. Starts populated from initialState; growing as new cards land.
   const [itemIds] = useState<Map<string, string>>(() => {
     const m = new Map<string, string>();
     initialState.forEach((v, k) => m.set(k, v.itemId));
@@ -52,12 +50,63 @@ export function Reviewer({
   const [syncError, setSyncError] = useState<string | undefined>(undefined);
   const [endError, setEndError] = useState<string | undefined>(undefined);
 
-  // Build state map from initialState for queue construction.
   const stateMap = (() => {
     const m = new Map<string, FSRSCardState>();
     initialState.forEach((v, k) => m.set(k, v.state));
     return m;
   })();
+
+  // Keyboard shortcuts in review mode: Space = reveal/Good; 1-4 = ratings.
+  useEffect(() => {
+    if (mode !== 'reviewing' || !session) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (sync === 'syncing') return;
+      if (!revealed) {
+        if (e.key === ' ' || e.key === 'Enter') {
+          e.preventDefault();
+          setRevealed(true);
+        }
+        return;
+      }
+      let chosen: ReviewRating | undefined;
+      if (e.key === '1') chosen = Rating.Again;
+      else if (e.key === '2') chosen = Rating.Hard;
+      else if (e.key === '3' || e.key === ' ' || e.key === 'Enter') chosen = Rating.Good;
+      else if (e.key === '4') chosen = Rating.Easy;
+      if (!chosen) return;
+      e.preventDefault();
+      void answerCard(chosen);
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, revealed, session, sync]);
+
+  async function answerCard(rating: ReviewRating): Promise<void> {
+    if (!session) return;
+    const item = currentItem(session);
+    if (!item) return;
+    const { next, updatedState } = answerSession(session, rating);
+    setSync('syncing');
+    setSyncError(undefined);
+    try {
+      const existing = itemIds.get(item.card.guid);
+      if (existing) {
+        await updateItem(token, srsProjectId, existing, srsFields, updatedState, item.card.guid);
+      } else {
+        const newId = await createItem(token, srsProjectId, srsFields, item.card, updatedState);
+        itemIds.set(item.card.guid, newId);
+      }
+      setSync('idle');
+    } catch (e: unknown) {
+      setSync('error');
+      setSyncError((e as Error).message);
+    }
+    setSession(next);
+    setRevealed(false);
+    if (isComplete(next)) setMode('completing');
+  }
 
   if (mode === 'preparing') {
     const queue = buildQueue(cards, stateMap);
@@ -70,8 +119,7 @@ export function Reviewer({
             : `${queue.length} card(s) in queue. Existing SRS items: ${initialState.size}.`}
         </p>
         <p class="muted" style={{ margin: 0, fontSize: '0.85em' }}>
-          Each answer persists to <code>anki-client/srs-state</code>; session summary writes to{' '}
-          <code>anki-client/session-log</code> at the end.
+          Shortcuts: <kbd>Space</kbd> show answer / Good · <kbd>1</kbd> Again · <kbd>2</kbd> Hard · <kbd>3</kbd> Good · <kbd>4</kbd> Easy
         </p>
         <div class="row">
           <button
@@ -97,6 +145,7 @@ export function Reviewer({
       return null;
     }
     const card = item.card;
+    const body = revealed ? renderAnswer(card) : renderQuestion(card);
     return (
       <section class="stack" style={{ border: '1px solid currentColor', borderRadius: 8, padding: '0.75rem' }}>
         <div class="row" style={{ justifyContent: 'space-between' }}>
@@ -107,56 +156,39 @@ export function Reviewer({
             {sync === 'error' && ` · sync failed: ${syncError}`}
           </span>
         </div>
-        <pre style={{ whiteSpace: 'pre-wrap', margin: 0, fontSize: '1.05em' }}>
-          {revealed ? renderAnswer(card) : renderQuestion(card)}
-        </pre>
+
+        <div class="card-body" dangerouslySetInnerHTML={{ __html: body }} />
+
         {revealed && card.extra && (
-          <p class="muted" style={{ margin: 0, borderTop: '1px solid currentColor', paddingTop: '0.5rem' }}>
-            {card.extra}
-          </p>
+          <div
+            class="card-body muted"
+            style={{ borderTop: '1px solid currentColor', paddingTop: '0.5rem', fontSize: '0.95em' }}
+            dangerouslySetInnerHTML={{ __html: renderExtra(card.extra) }}
+          />
         )}
         {revealed && card.source && (
           <p class="muted" style={{ margin: 0, fontSize: '0.85em' }}>{card.source}</p>
         )}
 
         {!revealed ? (
-          <button onClick={() => setRevealed(true)}>Show answer</button>
+          <button onClick={() => setRevealed(true)}>
+            Show answer<span class="kbd-hint">[Space]</span>
+          </button>
         ) : (
           <div class="row">
             {([
-              [Rating.Again, 'Again'],
-              [Rating.Hard,  'Hard'],
-              [Rating.Good,  'Good'],
-              [Rating.Easy,  'Easy'],
-            ] as const).map(([rating, label]) => (
+              [Rating.Again, 'Again', '1'],
+              [Rating.Hard,  'Hard',  '2'],
+              [Rating.Good,  'Good',  '3'],
+              [Rating.Easy,  'Easy',  '4'],
+            ] as const).map(([rating, label, key]) => (
               <button
                 key={rating}
                 disabled={sync === 'syncing'}
-                onClick={async () => {
-                  const { next, updatedState } = answerSession(session, rating as ReviewRating);
-                  setSync('syncing');
-                  setSyncError(undefined);
-                  try {
-                    const existingItemId = itemIds.get(card.guid);
-                    if (existingItemId) {
-                      await updateItem(token, srsProjectId, existingItemId, srsFields, updatedState, card.guid);
-                    } else {
-                      const newItemId = await createItem(token, srsProjectId, srsFields, card, updatedState);
-                      itemIds.set(card.guid, newItemId);
-                    }
-                    setSync('idle');
-                  } catch (e: unknown) {
-                    setSync('error');
-                    setSyncError((e as Error).message);
-                    // Keep going — in-memory state still advances; user can retry by re-answering later.
-                  }
-                  setSession(next);
-                  setRevealed(false);
-                  if (isComplete(next)) setMode('completing');
-                }}
+                onClick={() => void answerCard(rating as ReviewRating)}
                 style={{ flex: 1 }}
               >
-                {label}
+                {label}<span class="kbd-hint">[{key}]</span>
                 <br />
                 <span class="muted" style={{ fontSize: '0.75em' }}>{intervalLabel(item.state, rating as ReviewRating)}</span>
               </button>
@@ -172,7 +204,6 @@ export function Reviewer({
   }
 
   if (mode === 'completing' && session) {
-    // Render summary and kick off the session-log write once.
     return (
       <CompletingScreen
         token={token}
