@@ -3,7 +3,7 @@
   "oauthClientId": "Ov23liNeYzb2SRSZLynD",
   "scopes": ["repo", "project"],
   "projectPrefix": "anki-client/",
-  "proxyUrl": "",
+  "proxyUrl": "https://www.ocf.berkeley.edu/~dip/anki-oauth/",
   "cardSource": {
     "owner": "dipidoo",
     "repo": "anki-decks",
