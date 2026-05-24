@@ -55,9 +55,14 @@ export function isComplete(session: ReviewSession): boolean {
   return session.index >= session.queue.length;
 }
 
+/** Window (ms) within which a re-rated card should reappear in the same session. */
+const REQUEUE_WINDOW_MS = 10 * 60 * 1000;
+
 /**
- * Answer the current card and advance. Returns the updated session and the
- * new card state (for the caller to persist).
+ * Answer the current card and advance. If the new state's `due` is still
+ * within REQUEUE_WINDOW_MS of now (typical for Again/Hard which bounce the
+ * card into a short learning step), the card is re-pushed to the end of the
+ * queue so the user sees it again before the session ends.
  */
 export function answer(
   session: ReviewSession,
@@ -70,6 +75,9 @@ export function answer(
   const log = { guid: item.card.guid, rating, at: now, from: item.state, to };
   const queue = session.queue.slice();
   queue[session.index] = { ...item, state: to };
+  if (to.due.getTime() - now.getTime() <= REQUEUE_WINDOW_MS) {
+    queue.push({ card: item.card, state: to });
+  }
   return {
     next: { ...session, queue, index: session.index + 1, answers: [...session.answers, log] },
     updatedState: to,
