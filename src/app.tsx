@@ -8,6 +8,12 @@ import {
   setToken,
   verifyToken,
 } from './auth';
+import {
+  clearProjectsCache,
+  discoverProjects,
+  loadCachedProjects,
+  type ProjectMap,
+} from './projects';
 
 type Viewer = { login: string; id: string };
 
@@ -19,9 +25,18 @@ type AuthState =
   | { kind: 'authed'; viewer: Viewer }
   | { kind: 'error'; message: string };
 
+type ProjectsState =
+  | { kind: 'idle' }
+  | { kind: 'loading' }
+  | { kind: 'loaded'; map: ProjectMap }
+  | { kind: 'error'; message: string };
+
+const REQUIRED_PURPOSES = ['srs-state', 'session-log'] as const;
+
 export function App() {
   const [config, setConfig] = useState<AppConfig | undefined>(undefined);
   const [state, setState] = useState<AuthState>({ kind: 'booting' });
+  const [projects, setProjects] = useState<ProjectsState>({ kind: 'idle' });
   const [patInput, setPatInput] = useState('');
 
   // Boot: load config, handle any OAuth callback in the URL, then try existing token.
@@ -30,7 +45,6 @@ export function App() {
       const cfg = await loadConfig();
       setConfig(cfg);
 
-      // 1. If we just came back from github.com with ?code=, exchange it.
       const cb = await handleCallback(cfg);
       if (cb.kind === 'error') {
         setState({ kind: 'error', message: cb.error ?? 'Auth callback failed.' });
@@ -47,7 +61,6 @@ export function App() {
         return;
       }
 
-      // 2. No callback in flight. Try a persisted token.
       const existing = getToken();
       if (!existing) {
         setState({ kind: 'unauth' });
@@ -62,6 +75,26 @@ export function App() {
       }
     })();
   }, []);
+
+  // After auth, discover projects (use cache first, refresh in background).
+  useEffect(() => {
+    if (state.kind !== 'authed' || !config) return;
+    const token = getToken();
+    if (!token) return;
+
+    const cached = loadCachedProjects(state.viewer.login);
+    if (cached) setProjects({ kind: 'loaded', map: cached });
+    else setProjects({ kind: 'loading' });
+
+    (async () => {
+      try {
+        const map = await discoverProjects(token, config.projectPrefix, state.viewer.login);
+        setProjects({ kind: 'loaded', map });
+      } catch (e: unknown) {
+        if (!cached) setProjects({ kind: 'error', message: (e as Error).message });
+      }
+    })();
+  }, [state.kind === 'authed' ? state.viewer.login : null, config]);
 
   if (state.kind === 'booting' || !config) return <p class="muted">Loading…</p>;
 
@@ -123,16 +156,32 @@ export function App() {
               Signed in as <strong>@{state.viewer.login}</strong>.
             </p>
             <p class="muted">
-              Card source: <code>{effective.cardSource.owner}/{effective.cardSource.repo}/{effective.cardSource.path}</code>.<br />
-              Projects to discover: <code>{effective.projectPrefix}*</code>.
+              Card source: <code>{effective.cardSource.owner}/{effective.cardSource.repo}/{effective.cardSource.path}</code>
             </p>
+
+            <ProjectsPanel
+              state={projects}
+              prefix={effective.projectPrefix}
+              viewerLogin={state.viewer.login}
+              onRefresh={() => {
+                const token = getToken();
+                if (!token) return;
+                clearProjectsCache(state.viewer.login);
+                setProjects({ kind: 'loading' });
+                discoverProjects(token, effective.projectPrefix, state.viewer.login)
+                  .then((map) => setProjects({ kind: 'loaded', map }))
+                  .catch((e) => setProjects({ kind: 'error', message: (e as Error).message }));
+              }}
+            />
+
             <p class="muted">
-              Next steps (not yet implemented): discover projects matching the prefix in{' '}
-              <code>@{state.viewer.login}</code>'s account, fetch cards via Contents API, FSRS queue.
+              Next steps: fetch cards via Contents API, FSRS queue, lazy Project Item creation on first review.
             </p>
             <button
               onClick={() => {
                 clearToken();
+                clearProjectsCache(state.viewer.login);
+                setProjects({ kind: 'idle' });
                 setState({ kind: 'unauth' });
               }}
             >
@@ -142,6 +191,68 @@ export function App() {
         );
       })()}
     </main>
+  );
+}
+
+function ProjectsPanel({
+  state,
+  prefix,
+  viewerLogin: _viewerLogin,
+  onRefresh,
+}: {
+  state: ProjectsState;
+  prefix: string;
+  viewerLogin: string;
+  onRefresh: () => void;
+}) {
+  return (
+    <section class="stack" style={{ border: '1px solid currentColor', borderRadius: 8, padding: '0.75rem' }}>
+      <div class="row" style={{ justifyContent: 'space-between' }}>
+        <strong>Projects discovered (<code>{prefix}*</code>)</strong>
+        <button onClick={onRefresh} style={{ fontSize: '0.85em', padding: '0.25rem 0.5rem' }}>
+          Refresh
+        </button>
+      </div>
+
+      {state.kind === 'idle' && <p class="muted" style={{ margin: 0 }}>—</p>}
+      {state.kind === 'loading' && <p class="muted" style={{ margin: 0 }}>Querying GraphQL…</p>}
+      {state.kind === 'error' && (
+        <p style={{ color: 'crimson', margin: 0 }}>Error: {state.message}</p>
+      )}
+
+      {state.kind === 'loaded' && (
+        <>
+          {state.map.all.length === 0 ? (
+            <p class="muted" style={{ margin: 0 }}>
+              No projects matching <code>{prefix}*</code>. Create them on github.com — see SYNC-DESIGN §11.1.
+            </p>
+          ) : (
+            <ul style={{ margin: 0, paddingLeft: '1.25rem' }}>
+              {state.map.all.map((p) => (
+                <li key={p.id}>
+                  <a href={p.url} target="_blank" rel="noreferrer">#{p.number}</a>{' '}
+                  <code>{p.purpose}</code>{' '}
+                  <span class="muted" style={{ fontSize: '0.85em' }}>{p.id}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {(() => {
+            const missing = REQUIRED_PURPOSES.filter((p) => !state.map.byPurpose[p]);
+            return missing.length === 0 ? (
+              <p class="muted" style={{ margin: 0, fontSize: '0.85em' }}>
+                ✓ Both required projects ({REQUIRED_PURPOSES.map((p) => <><code>{p}</code> </>)}) present.
+              </p>
+            ) : (
+              <p style={{ color: 'orange', margin: 0, fontSize: '0.85em' }}>
+                Missing: {missing.map((p) => <><code>{prefix}{p}</code> </>)}
+              </p>
+            );
+          })()}
+        </>
+      )}
+    </section>
   );
 }
 
