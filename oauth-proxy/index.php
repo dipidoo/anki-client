@@ -20,9 +20,18 @@ const ALLOWED_ORIGINS = [
 const GITHUB_CLIENT_ID = 'Ov23liNeYzb2SRSZLynD';
 const GITHUB_TOKEN_URL = 'https://github.com/login/oauth/access_token';
 
-// Secret lives OUTSIDE public_html. See README for setup.
-// __DIR__ = ~/public_html/anki-oauth → ../../ = ~/
-const SECRET_PATH = __DIR__ . '/../../.config/anki-oauth/client_secret';
+// Secret lives OUTSIDE public_html. Resolve via $HOME (set by the FPM pool),
+// falling back to the user database. Relative __DIR__ traversal does NOT work
+// reliably on OCF — the FPM pool's view of the filesystem differs from shell.
+function resolve_secret_path() {
+    $home = getenv('HOME');
+    if (!$home && function_exists('posix_geteuid') && function_exists('posix_getpwuid')) {
+        $info = posix_getpwuid(posix_geteuid());
+        if ($info && !empty($info['dir'])) $home = $info['dir'];
+    }
+    if (!$home) return null;
+    return $home . '/.config/anki-oauth/client_secret';
+}
 
 // ---- Headers (set BEFORE any possible error output) ---------------------
 
@@ -80,11 +89,20 @@ if (strpos($contentType, 'application/json') !== false) {
     if (is_array($decoded)) $body = $decoded;
 } else {
     parse_str($raw, $body);
+$secretPath = resolve_secret_path();
+if (!$secretPath) {
+    error_log('anki-oauth: cannot resolve $HOME');
+    send_json(500, ['error' => 'server_misconfigured', 'detail' => 'no_home']);
 }
-
-$code = isset($body['code']) ? $body['code'] : '';
-if (!is_string($code) || $code === '') {
-    send_json(400, ['error' => 'missing_code']);
+if (!is_readable($secretPath)) {
+    error_log('anki-oauth: secret not readable at ' . $secretPath);
+    send_json(500, [
+        'error' => 'server_misconfigured',
+        'detail' => 'secret_not_readable',
+        'attempted_path' => $secretPath, // safe to disclose; just a path
+    ]);
+}
+$clientSecret = trim((string) file_get_contents($secretPath
 }
 
 // ---- Load secret --------------------------------------------------------
