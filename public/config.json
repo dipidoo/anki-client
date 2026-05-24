@@ -1,11 +1,11 @@
 {
-  "_comment": "Public bundled defaults. The Client ID is public by design. Set proxyUrl after deploying oauth-proxy/. Override any of these at runtime in the Settings page; overrides persist in localStorage as 'anki-client:config'.",
+  "_comment": "Public bundled defaults. The Client ID is public by design. Set proxyUrl after deploying oauth-proxy/. Empty cardSource.owner means 'use the authenticated viewer.login' — works for any forker without changes.",
   "oauthClientId": "Ov23liNeYzb2SRSZLynD",
   "scopes": ["repo", "project"],
   "projectPrefix": "anki-client/",
   "proxyUrl": "https://www.ocf.berkeley.edu/~dip/anki-oauth/",
   "cardSource": {
-    "owner": "dipidoo",
+    "owner": "",
     "repo": "anki-decks",
     "branch": "main",
     "path": "cards"

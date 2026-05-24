@@ -5,6 +5,7 @@ export interface AppConfig {
   /** URL of the server-side OAuth code-exchange helper. See oauth-proxy/. */
   proxyUrl?: string;
   cardSource: {
+    /** Empty string means "use the authenticated viewer.login at runtime". */
     owner: string;
     repo: string;
     branch: string;
@@ -22,6 +23,20 @@ export async function loadConfig(): Promise<AppConfig> {
   const override = localStorage.getItem(LS_OVERRIDE_KEY);
   cached = override ? { ...base, ...JSON.parse(override) } : base;
   return cached!;
+}
+
+/**
+ * Returns the config with any "use viewer" placeholders resolved against the
+ * authed user. Call this after a successful sign-in.
+ */
+export function resolveConfig(config: AppConfig, viewerLogin: string): AppConfig {
+  return {
+    ...config,
+    cardSource: {
+      ...config.cardSource,
+      owner: config.cardSource.owner || viewerLogin,
+    },
+  };
 }
 
 export function saveOverride(partial: Partial<AppConfig>): void {

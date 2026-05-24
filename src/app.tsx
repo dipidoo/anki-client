@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'preact/hooks';
-import { loadConfig, type AppConfig } from './config';
+import { loadConfig, resolveConfig, type AppConfig } from './config';
 import {
   authorize,
   clearToken,
@@ -72,8 +72,8 @@ export function App() {
       {state.kind === 'unauth' && (
         <div class="stack">
           <p class="muted">
-            Sign in to load cards from <code>{config.cardSource.owner}/{config.cardSource.repo}</code>{' '}
-            and sync SRS state to your <code>{config.projectPrefix}*</code> projects.
+            Sign in to load cards from your <code>{config.cardSource.repo}</code> repo and sync SRS state to
+            your <code>{config.projectPrefix}*</code> projects.
           </p>
           <button onClick={() => authorize(config)} disabled={!config.proxyUrl}>
             Sign in with GitHub
@@ -115,26 +115,32 @@ export function App() {
         </div>
       )}
 
-      {state.kind === 'authed' && (
-        <div class="stack">
-          <p>
-            Signed in as <strong>@{state.viewer.login}</strong>.
-          </p>
-          <p class="muted">
-            Next steps (not yet implemented): discover projects matching{' '}
-            <code>{config.projectPrefix}*</code>, fetch cards from{' '}
-            <code>{config.cardSource.owner}/{config.cardSource.repo}/{config.cardSource.path}</code>, FSRS queue.
-          </p>
-          <button
-            onClick={() => {
-              clearToken();
-              setState({ kind: 'unauth' });
-            }}
-          >
-            Sign out
-          </button>
-        </div>
-      )}
+      {state.kind === 'authed' && (() => {
+        const effective = resolveConfig(config, state.viewer.login);
+        return (
+          <div class="stack">
+            <p>
+              Signed in as <strong>@{state.viewer.login}</strong>.
+            </p>
+            <p class="muted">
+              Card source: <code>{effective.cardSource.owner}/{effective.cardSource.repo}/{effective.cardSource.path}</code>.<br />
+              Projects to discover: <code>{effective.projectPrefix}*</code>.
+            </p>
+            <p class="muted">
+              Next steps (not yet implemented): discover projects matching the prefix in{' '}
+              <code>@{state.viewer.login}</code>'s account, fetch cards via Contents API, FSRS queue.
+            </p>
+            <button
+              onClick={() => {
+                clearToken();
+                setState({ kind: 'unauth' });
+              }}
+            >
+              Sign out
+            </button>
+          </div>
+        );
+      })()}
     </main>
   );
 }
