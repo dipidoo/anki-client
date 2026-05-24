@@ -14,6 +14,7 @@ import {
   loadCachedProjects,
   type ProjectMap,
 } from './projects';
+import { loadAllCards, type Card } from './cards';
 
 type Viewer = { login: string; id: string };
 
@@ -31,12 +32,19 @@ type ProjectsState =
   | { kind: 'loaded'; map: ProjectMap }
   | { kind: 'error'; message: string };
 
+type CardsState =
+  | { kind: 'idle' }
+  | { kind: 'loading' }
+  | { kind: 'loaded'; cards: Card[] }
+  | { kind: 'error'; message: string };
+
 const REQUIRED_PURPOSES = ['srs-state', 'session-log'] as const;
 
 export function App() {
   const [config, setConfig] = useState<AppConfig | undefined>(undefined);
   const [state, setState] = useState<AuthState>({ kind: 'booting' });
   const [projects, setProjects] = useState<ProjectsState>({ kind: 'idle' });
+  const [cards, setCards] = useState<CardsState>({ kind: 'idle' });
   const [patInput, setPatInput] = useState('');
 
   // Boot: load config, handle any OAuth callback in the URL, then try existing token.
@@ -76,24 +84,28 @@ export function App() {
     })();
   }, []);
 
-  // After auth, discover projects (use cache first, refresh in background).
+  // After auth, discover projects + load cards in parallel.
   useEffect(() => {
     if (state.kind !== 'authed' || !config) return;
     const token = getToken();
     if (!token) return;
+    const effective = resolveConfig(config, state.viewer.login);
 
+    // Projects: cache-first, refresh in background.
     const cached = loadCachedProjects(state.viewer.login);
     if (cached) setProjects({ kind: 'loaded', map: cached });
     else setProjects({ kind: 'loading' });
-
-    (async () => {
-      try {
-        const map = await discoverProjects(token, config.projectPrefix, state.viewer.login);
-        setProjects({ kind: 'loaded', map });
-      } catch (e: unknown) {
+    discoverProjects(token, effective.projectPrefix, state.viewer.login)
+      .then((map) => setProjects({ kind: 'loaded', map }))
+      .catch((e) => {
         if (!cached) setProjects({ kind: 'error', message: (e as Error).message });
-      }
-    })();
+      });
+
+    // Cards: always fresh on first load (small files, infrequent change).
+    setCards({ kind: 'loading' });
+    loadAllCards(token, effective.cardSource)
+      .then((cs) => setCards({ kind: 'loaded', cards: cs }))
+      .catch((e) => setCards({ kind: 'error', message: (e as Error).message }));
   }, [state.kind === 'authed' ? state.viewer.login : null, config]);
 
   if (state.kind === 'booting' || !config) return <p class="muted">Loading…</p>;
@@ -155,14 +167,10 @@ export function App() {
             <p>
               Signed in as <strong>@{state.viewer.login}</strong>.
             </p>
-            <p class="muted">
-              Card source: <code>{effective.cardSource.owner}/{effective.cardSource.repo}/{effective.cardSource.path}</code>
-            </p>
 
             <ProjectsPanel
               state={projects}
               prefix={effective.projectPrefix}
-              viewerLogin={state.viewer.login}
               onRefresh={() => {
                 const token = getToken();
                 if (!token) return;
@@ -174,14 +182,28 @@ export function App() {
               }}
             />
 
+            <CardsPanel
+              state={cards}
+              source={effective.cardSource}
+              onRefresh={() => {
+                const token = getToken();
+                if (!token) return;
+                setCards({ kind: 'loading' });
+                loadAllCards(token, effective.cardSource)
+                  .then((cs) => setCards({ kind: 'loaded', cards: cs }))
+                  .catch((e) => setCards({ kind: 'error', message: (e as Error).message }));
+              }}
+            />
+
             <p class="muted">
-              Next steps: fetch cards via Contents API, FSRS queue, lazy Project Item creation on first review.
+              Next step: FSRS queue, lazy Project Item creation on first review, answer-button capture.
             </p>
             <button
               onClick={() => {
                 clearToken();
                 clearProjectsCache(state.viewer.login);
                 setProjects({ kind: 'idle' });
+                setCards({ kind: 'idle' });
                 setState({ kind: 'unauth' });
               }}
             >
@@ -197,12 +219,10 @@ export function App() {
 function ProjectsPanel({
   state,
   prefix,
-  viewerLogin: _viewerLogin,
   onRefresh,
 }: {
   state: ProjectsState;
   prefix: string;
-  viewerLogin: string;
   onRefresh: () => void;
 }) {
   return (
@@ -231,8 +251,7 @@ function ProjectsPanel({
               {state.map.all.map((p) => (
                 <li key={p.id}>
                   <a href={p.url} target="_blank" rel="noreferrer">#{p.number}</a>{' '}
-                  <code>{p.purpose}</code>{' '}
-                  <span class="muted" style={{ fontSize: '0.85em' }}>{p.id}</span>
+                  <code>{p.purpose}</code>
                 </li>
               ))}
             </ul>
@@ -242,11 +261,11 @@ function ProjectsPanel({
             const missing = REQUIRED_PURPOSES.filter((p) => !state.map.byPurpose[p]);
             return missing.length === 0 ? (
               <p class="muted" style={{ margin: 0, fontSize: '0.85em' }}>
-                ✓ Both required projects ({REQUIRED_PURPOSES.map((p) => <><code>{p}</code> </>)}) present.
+                ✓ Both required projects present.
               </p>
             ) : (
               <p style={{ color: 'orange', margin: 0, fontSize: '0.85em' }}>
-                Missing: {missing.map((p) => <><code>{prefix}{p}</code> </>)}
+                Missing: {missing.map((p) => <><code>{prefix}{p}</code>{' '}</>)}
               </p>
             );
           })()}
@@ -254,6 +273,89 @@ function ProjectsPanel({
       )}
     </section>
   );
+}
+
+function CardsPanel({
+  state,
+  source,
+  onRefresh,
+}: {
+  state: CardsState;
+  source: { owner: string; repo: string; branch: string; path: string };
+  onRefresh: () => void;
+}) {
+  return (
+    <section class="stack" style={{ border: '1px solid currentColor', borderRadius: 8, padding: '0.75rem' }}>
+      <div class="row" style={{ justifyContent: 'space-between' }}>
+        <strong>Cards loaded</strong>
+        <button onClick={onRefresh} style={{ fontSize: '0.85em', padding: '0.25rem 0.5rem' }}>
+          Refresh
+        </button>
+      </div>
+
+      <p class="muted" style={{ margin: 0, fontSize: '0.85em' }}>
+        Source: <code>{source.owner}/{source.repo}@{source.branch}:{source.path}/</code>
+      </p>
+
+      {state.kind === 'idle' && <p class="muted" style={{ margin: 0 }}>—</p>}
+      {state.kind === 'loading' && <p class="muted" style={{ margin: 0 }}>Fetching YAML…</p>}
+      {state.kind === 'error' && (
+        <p style={{ color: 'crimson', margin: 0 }}>Error: {state.message}</p>
+      )}
+
+      {state.kind === 'loaded' && <CardsSummary cards={state.cards} />}
+    </section>
+  );
+}
+
+function CardsSummary({ cards }: { cards: Card[] }) {
+  if (cards.length === 0) {
+    return <p class="muted" style={{ margin: 0 }}>No cards found.</p>;
+  }
+  const byFile = groupBy(cards, (c) => c.sourceFile);
+  const byDeck = groupBy(cards, (c) => c.deck);
+  return (
+    <div class="stack">
+      <p style={{ margin: 0 }}>
+        <strong>{cards.length}</strong> cards across <strong>{Object.keys(byFile).length}</strong> files,
+        <strong> {Object.keys(byDeck).length}</strong> deck(s).
+      </p>
+      <details>
+        <summary class="muted">By file</summary>
+        <ul style={{ margin: '0.5rem 0', paddingLeft: '1.25rem' }}>
+          {Object.entries(byFile)
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([file, list]) => (
+              <li key={file}>
+                <code>{file}</code> — {list.length}
+              </li>
+            ))}
+        </ul>
+      </details>
+      <details>
+        <summary class="muted">First 3 cards (preview)</summary>
+        <div class="stack" style={{ marginTop: '0.5rem' }}>
+          {cards.slice(0, 3).map((c) => (
+            <div key={c.guid} style={{ border: '1px solid currentColor', borderRadius: 6, padding: '0.5rem' }}>
+              <p class="muted" style={{ margin: 0, fontSize: '0.8em' }}>
+                <code>{c.id}</code> · guid <code>{c.guid}</code> · {c.notetype} · {c.tags.join(' ')}
+              </p>
+              <pre style={{ whiteSpace: 'pre-wrap', margin: '0.5rem 0 0', fontSize: '0.9em' }}>{c.front}</pre>
+            </div>
+          ))}
+        </div>
+      </details>
+    </div>
+  );
+}
+
+function groupBy<T, K extends string | number>(xs: T[], key: (x: T) => K): Record<string, T[]> {
+  const out: Record<string, T[]> = {};
+  for (const x of xs) {
+    const k = String(key(x));
+    (out[k] ??= []).push(x);
+  }
+  return out;
 }
 
 async function acceptPat(
