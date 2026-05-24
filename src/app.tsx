@@ -15,6 +15,7 @@ import {
   type ProjectMap,
 } from './projects';
 import { loadAllCards, type Card } from './cards';
+import { Reviewer } from './reviewer';
 
 type Viewer = { login: string; id: string };
 
@@ -38,6 +39,8 @@ type CardsState =
   | { kind: 'loaded'; cards: Card[] }
   | { kind: 'error'; message: string };
 
+type View = 'home' | 'review';
+
 const REQUIRED_PURPOSES = ['srs-state', 'session-log'] as const;
 
 export function App() {
@@ -46,8 +49,8 @@ export function App() {
   const [projects, setProjects] = useState<ProjectsState>({ kind: 'idle' });
   const [cards, setCards] = useState<CardsState>({ kind: 'idle' });
   const [patInput, setPatInput] = useState('');
+  const [view, setView] = useState<View>('home');
 
-  // Boot: load config, handle any OAuth callback in the URL, then try existing token.
   useEffect(() => {
     (async () => {
       const cfg = await loadConfig();
@@ -84,14 +87,12 @@ export function App() {
     })();
   }, []);
 
-  // After auth, discover projects + load cards in parallel.
   useEffect(() => {
     if (state.kind !== 'authed' || !config) return;
     const token = getToken();
     if (!token) return;
     const effective = resolveConfig(config, state.viewer.login);
 
-    // Projects: cache-first, refresh in background.
     const cached = loadCachedProjects(state.viewer.login);
     if (cached) setProjects({ kind: 'loaded', map: cached });
     else setProjects({ kind: 'loading' });
@@ -101,7 +102,6 @@ export function App() {
         if (!cached) setProjects({ kind: 'error', message: (e as Error).message });
       });
 
-    // Cards: always fresh on first load (small files, infrequent change).
     setCards({ kind: 'loading' });
     loadAllCards(token, effective.cardSource)
       .then((cs) => setCards({ kind: 'loaded', cards: cs }))
@@ -162,6 +162,12 @@ export function App() {
 
       {state.kind === 'authed' && (() => {
         const effective = resolveConfig(config, state.viewer.login);
+        const loadedCards = cards.kind === 'loaded' ? cards.cards : [];
+
+        if (view === 'review' && loadedCards.length > 0) {
+          return <Reviewer cards={loadedCards} onExit={() => setView('home')} />;
+        }
+
         return (
           <div class="stack">
             <p>
@@ -195,9 +201,20 @@ export function App() {
               }}
             />
 
-            <p class="muted">
-              Next step: FSRS queue, lazy Project Item creation on first review, answer-button capture.
+            <button
+              onClick={() => setView('review')}
+              disabled={cards.kind !== 'loaded' || loadedCards.length === 0}
+              style={{ alignSelf: 'flex-start' }}
+            >
+              Start review →
+            </button>
+
+            <p class="muted" style={{ fontSize: '0.85em' }}>
+              Phase 3a: in-memory FSRS only. Next (3b): persist per-card state to{' '}
+              <code>{effective.projectPrefix}srs-state</code> + write session summary to{' '}
+              <code>{effective.projectPrefix}session-log</code>.
             </p>
+
             <button
               onClick={() => {
                 clearToken();
@@ -206,6 +223,7 @@ export function App() {
                 setCards({ kind: 'idle' });
                 setState({ kind: 'unauth' });
               }}
+              style={{ alignSelf: 'flex-start', fontSize: '0.85em' }}
             >
               Sign out
             </button>
@@ -244,7 +262,7 @@ function ProjectsPanel({
         <>
           {state.map.all.length === 0 ? (
             <p class="muted" style={{ margin: 0 }}>
-              No projects matching <code>{prefix}*</code>. Create them on github.com — see SYNC-DESIGN §11.1.
+              No projects matching <code>{prefix}*</code>. Create them on github.com.
             </p>
           ) : (
             <ul style={{ margin: 0, paddingLeft: '1.25rem' }}>
@@ -303,59 +321,14 @@ function CardsPanel({
         <p style={{ color: 'crimson', margin: 0 }}>Error: {state.message}</p>
       )}
 
-      {state.kind === 'loaded' && <CardsSummary cards={state.cards} />}
+      {state.kind === 'loaded' && (
+        <p style={{ margin: 0 }}>
+          <strong>{state.cards.length}</strong> cards across{' '}
+          <strong>{new Set(state.cards.map((c) => c.sourceFile)).size}</strong> files.
+        </p>
+      )}
     </section>
   );
-}
-
-function CardsSummary({ cards }: { cards: Card[] }) {
-  if (cards.length === 0) {
-    return <p class="muted" style={{ margin: 0 }}>No cards found.</p>;
-  }
-  const byFile = groupBy(cards, (c) => c.sourceFile);
-  const byDeck = groupBy(cards, (c) => c.deck);
-  return (
-    <div class="stack">
-      <p style={{ margin: 0 }}>
-        <strong>{cards.length}</strong> cards across <strong>{Object.keys(byFile).length}</strong> files,
-        <strong> {Object.keys(byDeck).length}</strong> deck(s).
-      </p>
-      <details>
-        <summary class="muted">By file</summary>
-        <ul style={{ margin: '0.5rem 0', paddingLeft: '1.25rem' }}>
-          {Object.entries(byFile)
-            .sort(([a], [b]) => a.localeCompare(b))
-            .map(([file, list]) => (
-              <li key={file}>
-                <code>{file}</code> — {list.length}
-              </li>
-            ))}
-        </ul>
-      </details>
-      <details>
-        <summary class="muted">First 3 cards (preview)</summary>
-        <div class="stack" style={{ marginTop: '0.5rem' }}>
-          {cards.slice(0, 3).map((c) => (
-            <div key={c.guid} style={{ border: '1px solid currentColor', borderRadius: 6, padding: '0.5rem' }}>
-              <p class="muted" style={{ margin: 0, fontSize: '0.8em' }}>
-                <code>{c.id}</code> · guid <code>{c.guid}</code> · {c.notetype} · {c.tags.join(' ')}
-              </p>
-              <pre style={{ whiteSpace: 'pre-wrap', margin: '0.5rem 0 0', fontSize: '0.9em' }}>{c.front}</pre>
-            </div>
-          ))}
-        </div>
-      </details>
-    </div>
-  );
-}
-
-function groupBy<T, K extends string | number>(xs: T[], key: (x: T) => K): Record<string, T[]> {
-  const out: Record<string, T[]> = {};
-  for (const x of xs) {
-    const k = String(key(x));
-    (out[k] ??= []).push(x);
-  }
-  return out;
 }
 
 async function acceptPat(
