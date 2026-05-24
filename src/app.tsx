@@ -18,6 +18,9 @@ import {
 import { loadAllCards, type Card } from './cards';
 import { Reviewer } from './reviewer';
 import { discoverFields, loadAllItems, type FieldMap, type SrsItem } from './srsState';
+import { collectImagePaths as _collectImagePaths, preloadImagesForCards } from './images';
+// suppress unused warning while keeping the export available
+void _collectImagePaths;
 
 type Viewer = { login: string; id: string };
 
@@ -67,6 +70,16 @@ export function App() {
   const [srs, setSrs] = useState<SrsState>({ kind: 'idle' });
   const [patInput, setPatInput] = useState('');
   const [view, setView] = useState<View>('home');
+  const [selectedDeck, setSelectedDeck] = useState<string | undefined>(() => {
+    const stored = localStorage.getItem('anki-client:selected-deck');
+    return stored ?? undefined;
+  });
+
+  function chooseDeck(deck: string | undefined): void {
+    setSelectedDeck(deck);
+    if (deck === undefined) localStorage.removeItem('anki-client:selected-deck');
+    else localStorage.setItem('anki-client:selected-deck', deck);
+  }
 
   useEffect(() => {
     (async () => {
@@ -120,10 +133,13 @@ export function App() {
         if (!cached) setProjects({ kind: 'error', message: (e as Error).message });
       });
 
-    // Cards
+    // Cards (and their images)
     setCards({ kind: 'loading' });
     loadAllCards(token, effective.cardSource)
-      .then((cs) => setCards({ kind: 'loaded', cards: cs }))
+      .then(async (cs) => {
+        await preloadImagesForCards(token, effective.cardSource, cs).catch(() => {});
+        setCards({ kind: 'loaded', cards: cs });
+      })
       .catch((e) => setCards({ kind: 'error', message: (e as Error).message }));
   }, [state.kind === 'authed' ? state.viewer.login : null, config]);
 
@@ -206,12 +222,14 @@ export function App() {
         const effective = resolveConfig(config, state.viewer.login);
         const loadedCards = cards.kind === 'loaded' ? cards.cards : [];
         const token = getToken();
+        const filteredCards =
+          selectedDeck === undefined ? loadedCards : loadedCards.filter((c) => c.deck === selectedDeck);
 
-        if (view === 'review' && loadedCards.length > 0 && srs.kind === 'loaded' && token) {
+        if (view === 'review' && filteredCards.length > 0 && srs.kind === 'loaded' && token) {
           return (
             <Reviewer
               token={token}
-              cards={loadedCards}
+              cards={filteredCards}
               cardSource={effective.cardSource}
               initialState={srs.bundle.items}
               srsProjectId={srs.bundle.srs.id}
@@ -250,11 +268,16 @@ export function App() {
             <CardsPanel
               state={cards}
               source={effective.cardSource}
+              selectedDeck={selectedDeck}
+              onSelectDeck={chooseDeck}
               onRefresh={() => {
                 if (!token) return;
                 setCards({ kind: 'loading' });
                 loadAllCards(token, effective.cardSource)
-                  .then((cs) => setCards({ kind: 'loaded', cards: cs }))
+                  .then(async (cs) => {
+                    await preloadImagesForCards(token, effective.cardSource, cs).catch(() => {});
+                    setCards({ kind: 'loaded', cards: cs });
+                  })
                   .catch((e) => setCards({ kind: 'error', message: (e as Error).message }));
               }}
             />
@@ -263,10 +286,10 @@ export function App() {
 
             <button
               onClick={() => setView('review')}
-              disabled={cards.kind !== 'loaded' || loadedCards.length === 0 || srs.kind !== 'loaded'}
+              disabled={cards.kind !== 'loaded' || filteredCards.length === 0 || srs.kind !== 'loaded'}
               style={{ alignSelf: 'flex-start' }}
             >
-              Start review →
+              Start review{selectedDeck ? ` (${selectedDeck})` : ' (all decks)'} →
             </button>
 
             <button
@@ -341,10 +364,14 @@ function ProjectsPanel({
 function CardsPanel({
   state,
   source,
+  selectedDeck,
+  onSelectDeck,
   onRefresh,
 }: {
   state: CardsState;
   source: { owner: string; repo: string; branch: string; path: string };
+  selectedDeck: string | undefined;
+  onSelectDeck: (deck: string | undefined) => void;
   onRefresh: () => void;
 }) {
   return (
@@ -357,15 +384,63 @@ function CardsPanel({
         Source: <code>{source.owner}/{source.repo}@{source.branch}:{source.path}/</code>
       </p>
       {state.kind === 'idle' && <p class="muted" style={{ margin: 0 }}>—</p>}
-      {state.kind === 'loading' && <p class="muted" style={{ margin: 0 }}>Fetching YAML…</p>}
+      {state.kind === 'loading' && <p class="muted" style={{ margin: 0 }}>Fetching YAML + images…</p>}
       {state.kind === 'error' && <p style={{ color: 'crimson', margin: 0 }}>Error: {state.message}</p>}
       {state.kind === 'loaded' && (
-        <p style={{ margin: 0 }}>
-          <strong>{state.cards.length}</strong> cards across{' '}
-          <strong>{new Set(state.cards.map((c) => c.sourceFile)).size}</strong> files.
-        </p>
+        <>
+          <p style={{ margin: 0 }}>
+            <strong>{state.cards.length}</strong> cards across{' '}
+            <strong>{new Set(state.cards.map((c) => c.sourceFile)).size}</strong> files,{' '}
+            <strong>{new Set(state.cards.map((c) => c.deck)).size}</strong> deck(s).
+          </p>
+          <DeckPicker cards={state.cards} selected={selectedDeck} onSelect={onSelectDeck} />
+        </>
       )}
     </section>
+  );
+}
+
+function DeckPicker({
+  cards,
+  selected,
+  onSelect,
+}: {
+  cards: Card[];
+  selected: string | undefined;
+  onSelect: (deck: string | undefined) => void;
+}) {
+  const counts = new Map<string, number>();
+  for (const c of cards) counts.set(c.deck, (counts.get(c.deck) ?? 0) + 1);
+  const decks = Array.from(counts.keys()).sort();
+  return (
+    <div class="row" style={{ flexWrap: 'wrap' }}>
+      <button
+        onClick={() => onSelect(undefined)}
+        style={{
+          fontSize: '0.85em',
+          padding: '0.25rem 0.5rem',
+          background: selected === undefined ? 'currentColor' : 'transparent',
+          color: selected === undefined ? 'canvas' : 'inherit',
+        }}
+      >
+        All ({cards.length})
+      </button>
+      {decks.map((d) => (
+        <button
+          key={d}
+          onClick={() => onSelect(d)}
+          style={{
+            fontSize: '0.85em',
+            padding: '0.25rem 0.5rem',
+            background: selected === d ? 'currentColor' : 'transparent',
+            color: selected === d ? 'canvas' : 'inherit',
+          }}
+          title={d}
+        >
+          {d} ({counts.get(d)})
+        </button>
+      ))}
+    </div>
   );
 }
 

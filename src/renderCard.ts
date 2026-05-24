@@ -1,9 +1,10 @@
 // Card rendering: convert YAML card text into safe HTML with KaTeX math,
-// styled cloze deletions, and image placeholders that reviewer.tsx fills
-// asynchronously via the Contents API.
+// styled cloze deletions, and inline images sourced from the image cache
+// (which is pre-populated by preloadImagesForCards before review starts).
 
 import katex from 'katex';
 import type { Card } from './cards';
+import { getImageContent } from './images';
 
 interface Token {
   kind: 'text' | 'math' | 'cloze' | 'image';
@@ -64,12 +65,20 @@ function renderMath(expr: string, displayMode: boolean): string {
 
 function renderImage(alt: string, path: string): string {
   const safeAlt = escapeHtml(alt);
-  const safePath = escapeHtml(path);
-  // Absolute http(s) URLs render directly; repo-relative paths get filled by reviewer.
   if (/^https?:\/\//i.test(path)) {
-    return `<img src="${safePath}" alt="${safeAlt}" class="card-image" loading="lazy" />`;
+    return `<img src="${escapeHtml(path)}" alt="${safeAlt}" class="card-image" loading="lazy" />`;
   }
-  return `<img data-card-image="${safePath}" alt="${safeAlt}" class="card-image" loading="lazy" />`;
+  const content = getImageContent(path);
+  if (!content) {
+    return `<span class="card-image-missing">[image not loaded: ${escapeHtml(path)}]</span>`;
+  }
+  if (content.kind === 'svg') {
+    return `<figure class="card-image card-image-svg" aria-label="${safeAlt}">${content.markup}</figure>`;
+  }
+  if (content.kind === 'data-url') {
+    return `<img src="${content.url}" alt="${safeAlt}" class="card-image" loading="lazy" />`;
+  }
+  return `<span class="card-image-missing">[image error: ${escapeHtml(path)}: ${escapeHtml(content.message)}]</span>`;
 }
 
 type ClozeMode = 'placeholder' | 'reveal';

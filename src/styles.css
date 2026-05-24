@@ -97,18 +97,22 @@ input[type='password'], input[type='text'] {
   border-radius: 4px;
 }
 
-.card-image:not([src]) {
-  min-height: 100px;
-  position: relative;
+figure.card-image {
+  margin: 0.5em 0;
+  text-align: center;
 }
-.card-image:not([src])::after {
-  content: 'loading image…';
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
+figure.card-image svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.card-image-missing {
+  display: inline-block;
+  padding: 0.25rem 0.5rem;
+  border: 1px dashed crimson;
+  color: crimson;
+  border-radius: 4px;
   font-size: 0.85em;
-  opacity: 0.6;
 }
 
 .cloze-placeholder {
