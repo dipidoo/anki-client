@@ -1,0 +1,12 @@
+{
+  "_comment": "Public bundled defaults. The Client ID is public by design (device flow). Override any of these at runtime in the Settings page; overrides persist in localStorage as 'anki-client:config'.",
+  "oauthClientId": "Ov23liNeYzb2SRSZLynD",
+  "scopes": ["repo", "project"],
+  "projectPrefix": "anki-client/",
+  "cardSource": {
+    "owner": "dipidoo",
+    "repo": "anki-decks",
+    "branch": "main",
+    "path": "cards"
+  }
+}
